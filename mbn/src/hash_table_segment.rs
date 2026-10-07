@@ -58,6 +58,51 @@ impl HashEntry {
     }
 }
 
+#[derive(Debug, Copy, Clone)]
+enum HashAlgorithm {
+    Sha1,
+    Sha256,
+    Sha384,
+    Unknown,
+}
+
+fn get_algo(
+    common_metadata: &Option<CommonMetadata>,
+    mbn_header: &MbnHeader,
+    reader: &ByteReader,
+) -> Result<HashAlgorithm> {
+    match common_metadata {
+        Some(CommonMetadata {
+            hash_table_algorithm: 2,
+            ..
+        }) => return Ok(HashAlgorithm::Sha256),
+        Some(CommonMetadata {
+            hash_table_algorithm: 3,
+            ..
+        }) => return Ok(HashAlgorithm::Sha384),
+        _ => (),
+    };
+
+    if let MbnHeader::V6(_) = &mbn_header {
+        return Ok(HashAlgorithm::Sha384);
+    }
+
+    let maybe_dummy = reader.peek::<[u8; 20]>(20)?;
+    if maybe_dummy.iter().all(|x| *x == 0) {
+        return Ok(HashAlgorithm::Sha1);
+    }
+    let maybe_dummy = reader.peek::<[u8; 32]>(32)?;
+    if maybe_dummy.iter().all(|x| *x == 0) {
+        return Ok(HashAlgorithm::Sha256);
+    }
+    let maybe_dummy = reader.peek::<[u8; 48]>(48)?;
+    if maybe_dummy.iter().all(|x| *x == 0) {
+        return Ok(HashAlgorithm::Sha384);
+    }
+
+    Ok(HashAlgorithm::Unknown)
+}
+
 impl HashTableSegment {
     /// Parse byte stream to hash table segment.
     ///
@@ -128,41 +173,8 @@ impl HashTableSegment {
             MbnHeader::V7(header) => header.code_size,
         };
 
-        let sha_algo = 'algo: {
-            match common_metadata {
-                Some(CommonMetadata {
-                    hash_table_algorithm: 2,
-                    ..
-                }) => break 'algo "SHA256",
-                Some(CommonMetadata {
-                    hash_table_algorithm: 3,
-                    ..
-                }) => break 'algo "SHA384",
-                _ => (),
-            };
-
-            if let MbnHeader::V6(_) = &mbn_header {
-                break 'algo "SHA384";
-            }
-
-            let maybe_dummy = reader.peek::<[u8; 20]>(20)?;
-            if maybe_dummy.iter().all(|x| *x == 0) {
-                break 'algo "SHA1";
-            }
-            let maybe_dummy = reader.peek::<[u8; 32]>(32)?;
-            if maybe_dummy.iter().all(|x| *x == 0) {
-                break 'algo "SHA256";
-            }
-            let maybe_dummy = reader.peek::<[u8; 48]>(48)?;
-            if maybe_dummy.iter().all(|x| *x == 0) {
-                break 'algo "SHA384";
-            }
-
-            return Err(ParseError::HashTableNotAligned(code_size));
-        };
-
-        match sha_algo {
-            "SHA1" => {
+        match get_algo(&common_metadata, &mbn_header, &reader) {
+            Ok(HashAlgorithm::Sha1) => {
                 if code_size % 20 != 0 {
                     return Err(ParseError::HashTableNotAligned(code_size));
                 }
@@ -170,7 +182,7 @@ impl HashTableSegment {
                     hash_table.push(HashEntry::Sha1(reader.read()?));
                 }
             }
-            "SHA256" => {
+            Ok(HashAlgorithm::Sha256) => {
                 if code_size % 32 != 0 {
                     return Err(ParseError::HashTableNotAligned(code_size));
                 }
@@ -178,7 +190,7 @@ impl HashTableSegment {
                     hash_table.push(HashEntry::Sha256(reader.read()?));
                 }
             }
-            "SHA384" => {
+            Ok(HashAlgorithm::Sha384) => {
                 if code_size % 48 != 0 {
                     return Err(ParseError::HashTableNotAligned(code_size));
                 }
@@ -186,7 +198,7 @@ impl HashTableSegment {
                     hash_table.push(HashEntry::Sha384(reader.read()?));
                 }
             }
-            _ => unreachable!(),
+            _ => {}
         };
 
         let qti_signature = match &mbn_header {
